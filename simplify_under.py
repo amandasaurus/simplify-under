@@ -100,6 +100,27 @@ def simplify(geom, value, buffer=None):
 
     return new_geom
 
+def rdp_python(geom, value):
+    """Use the pure python RDP simplification value"""
+    import rdp
+
+    if geom.type == 'MultiPolygon':
+        return shapely.geometry.MultiPolygon([rdp_python(poly, value) for poly in geom.geoms])
+
+    #import pdb ; pdb.set_trace()
+    assert geom.type == 'Polygon'
+
+    exterior = rdp.rdp(geom.exterior.coords, value)
+    interiors = [rdp.rdp(interior.coords, value) for interior in geom.interiors]
+    # if an interior has been reduced to 2 points, then it would be invalid to use it as a LinearRing. However if it's 2 points, we can remove it because we presume that it's being simplified away
+    interiors = [i for i in interiors if len(i) > 2]
+    if len(interiors) == 0:
+        interiors = None
+    print exterior
+    print interiors
+    return shapely.geometry.Polygon(exterior, interiors)
+
+
 
 
 def reduce_points_combined(geoms, num_points, buffer=None):
