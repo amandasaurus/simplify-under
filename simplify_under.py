@@ -8,23 +8,29 @@ from __future__ import division
 
 import argparse
 import fiona
-import shapely.geometry
+import shapely.geometry, shapely.wkt
 import logging
 import sys
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 
+
 def num_points_in_polygon(geom):
     """Return number of points in a shapely geometry."""
-    if geom.is_empty:
+    if geom is None or geom.is_empty:
         return 0
 
     if geom.type == 'Polygon':
         return len(geom.exterior.coords) + sum(len(interior.coords) for interior in geom.interiors)
     elif geom.type == 'MultiPolygon':
         return sum(num_points_in_polygon(poly) for poly in geom.geoms)
+
+
+def num_points_in_polygons(geoms):
+    return sum(num_points_in_polygon(geom) for geom in geoms)
 
 
 def reduce_points(geom, num_points):
@@ -36,6 +42,13 @@ def reduce_points(geom, num_points):
     :returns: a new geometry
     """
     if geom is None:
+        logger.debug("Got None argument, returning")
+        return geom
+
+    # Is it already under?
+    these_num_points = num_points_in_polygon(geom)
+    if these_num_points <= num_points:
+        logger.debug("Objects already has %d points which is <= %d points", these_num_points, num_points)
         return geom
 
     # find a min & max
@@ -44,7 +57,7 @@ def reduce_points(geom, num_points):
 
     # ensure our max is big enough
     while True:
-        max_geom = geom.simplify(max, preserve_topology=False)
+        max_geom = simplify(geom, max)
         max_geom_points = num_points_in_polygon(max_geom)
         if max_geom_points > num_points:
             max = max * 10
@@ -53,7 +66,7 @@ def reduce_points(geom, num_points):
 
     for step in range(1000):
         middle_value = ((max - min) / 2) + min
-        new_geom = geom.simplify(middle_value, preserve_topology=False)
+        new_geom = simplify(geom, middle_value)
         middle_value_points = num_points_in_polygon(new_geom)
 
         if middle_value_points == num_points:
@@ -67,8 +80,80 @@ def reduce_points(geom, num_points):
             max = middle_value
 
         if abs(max - min) < 0.00001:
-            logger.debug("close enough")
+            logger.debug("close enough, difference of %s", abs(max - min))
             return new_geom
+
+    return new_geom
+
+def simplify(geom, value, buffer=None):
+    if geom is None or geom.is_empty:
+        return geom
+
+    if buffer is not None:
+        geom = geom.buffer(buffer*value)
+
+    new_geom = geom.simplify(value, preserve_topology=False)
+
+    if new_geom.is_empty:
+        # We shouldn't get empty geoms, so do it again with preserve_topology=True
+        logger.debug("Turned a non-empty geometry into empty for value=%s", value)
+
+    return new_geom
+
+
+
+def reduce_points_combined(geoms, num_points, buffer=None):
+    """
+    Iteratively reduce the points in the list of polygons.
+
+    :param list of shapely.geometry geom: The list of geometries to simplify
+    :param int num_points: The maximum number of points that should be in all polygons
+    :param float buffer: If not None, add a buffer of this fraction of the value around the geom before simplification
+    :returns: a new list of new polygons
+    """
+    if geoms is None or len(geoms) == 0:
+        logger.debug("Got None or empty list, returning that")
+        return geom
+
+    # Is it already under?
+    these_num_points = num_points_in_polygons(geoms)
+    if these_num_points <= num_points:
+        logger.debug("Objects already has %d points which is <= %d points", these_num_points, num_points)
+        return geoms
+
+    # find a min & max
+    min, max = 0.0001, 1000
+    new_geom = None
+
+    # ensure our max is big enough
+    for step in range(1000):
+        max_geoms = [simplify(geom, max) for geom in geoms]
+        max_geoms_points = num_points_in_polygons(max_geoms)
+        if max_geoms_points > num_points:
+            max = max * 10
+        else:
+            break
+
+    for step in range(1000):
+        middle_value = ((max - min) / 2) + min
+        new_geoms = [simplify(geom, middle_value, buffer) for geom in geoms]
+        middle_value_points = num_points_in_polygons(new_geoms)
+
+        if middle_value_points == num_points:
+            # shortcut, success, this is as good as we can get
+            return new_geoms
+        elif middle_value_points > num_points:
+            logger.debug("Step {}, min={}, max={}, middle_value={}, middle_value_points={} TOO LARGE".format(step, min, max, middle_value, middle_value_points))
+            min = middle_value
+        elif middle_value_points < num_points:
+            logger.debug("Step {}, min={}, max={}, middle_value={}, middle_value_points={} TOO SMALL".format(step, min, max, middle_value, middle_value_points))
+            max = middle_value
+
+        if abs(max - min) < 0.00001:
+            logger.debug("close enough, difference of %s", abs(max - min))
+            return new_geoms
+
+    return new_geoms
 
 
 def main():
@@ -79,6 +164,10 @@ def main():
     parser.add_argument('outputfilename', help="Filename to write the new, simplified file to")
 
     parser.add_argument('-d', '--debug', action='store_true', help="Print debugging information")
+
+    parser.add_argument('-g', '--group-by', metavar="PROPERTY", help="Group objects by this property, and use the combined point count of this group to see if we have too many points.", default=None, required=False)
+    parser.add_argument('-N', '--drop-null', action="store_true", help="Drop geometries/rows that have been simplified to empty geometries. By default the rows with empty/null geometries will be kept.", required=False)
+    parser.add_argument('-B', '--buffer', type=float, default=None, help="Before simplification, add a buffer around the geometry as this fraction of the simplification param. If ommitted, no buffer is added. Used to clean up geometries before. e.g. -B 0.001 adds a buffer of 0.1% of the current simplification", required=False)
 
     args = parser.parse_args()
 
@@ -96,15 +185,72 @@ def main():
         logger.debug("Source meta: %s", source.meta)
 
         with fiona.open(args.outputfilename, 'w', **source.meta) as sink:
-            for row in source:
-                num_points = sum(len(x) for x in row['geometry']['coordinates'])
-                if num_points > args.num_points and False:
-                    logger.debug("Reducing %s", row['properties'])
-                    geom = shapely.geometry.shape(row['geometry'])
-                    new_geom = reduce_points(geom, args.num_points)
-                    row['geometry'] = shapely.geometry.mapping(new_geom)
+            if args.group_by is None:
+                # Simple point count per object
+                for row in source:
+                    num_points = sum(len(x) for x in row['geometry']['coordinates'])
+                    if num_points > args.num_points and False:
+                        logger.debug("Reducing %s", row['properties'])
+                        geom = shapely.geometry.shape(row['geometry'])
+                        new_geom = reduce_points(geom, args.num_points)
 
-                sink.write(row)
+                        is_null = new_geom is None or new_geom.is_empty
+                        if is_null:
+                            new_num_empty_geoms += 1
+                            logger.debug("Object with these properties has been reduced to an empty geometry: %r", row['properties'])
+                            row['geometry'] = None
+                        else:
+                            row['geometry'] = shapely.geometry.mapping(new_geom)
+
+                    # And save this object
+                    if args.drop_null:
+                        if not is_null:
+                            sink.write(row)
+                    else:
+                        sink.write(row)
+
+            else:
+                logger.debug("Grouping object by the key: %s", args.group_by)
+                # We are grouping
+                groups = defaultdict(list)
+                for row in source:
+                    groups[row['properties'][args.group_by]].append(row)
+
+                logger.debug("Objects grouped. There are %d unique keys", len(groups))
+
+                # Now simplify each group
+                for group_key in groups:
+                    logger.debug("Simplifying all the objects with %s=%s", args.group_by, group_key)
+                    objs = groups[group_key]
+                    # Extract shapes
+                    # If the geometry is "None", then make it empty
+                    old_num_empty_geoms = sum(1 if obj['geometry'] is None else 0 for obj in objs)
+                    geoms = [(shapely.geometry.shape(obj['geometry']) if obj['geometry'] else None) for obj in objs]
+                    # Simplify
+                    #if group_key == 51477:
+                    #    import pdb ; pdb.set_trace()
+                    new_geoms = reduce_points_combined(geoms, args.num_points, buffer=args.buffer)
+                    new_num_empty_geoms = 0
+
+                    # Match up properties again
+                    for obj, new_geom in zip(objs, new_geoms):
+                        is_null = new_geom is None or new_geom.is_empty
+                        if is_null:
+                            new_num_empty_geoms += 1
+                            logger.debug("Object with these properties has been reduced to an empty geometry: %r", obj['properties'])
+                            obj['geometry'] = None
+                        else:
+                            obj['geometry'] = shapely.geometry.mapping(new_geom)
+
+                        # And save this object
+                        if args.drop_null:
+                            if not is_null:
+                                sink.write(obj)
+                        else:
+                            sink.write(obj)
+
+                    if old_num_empty_geoms != new_num_empty_geoms:
+                        logger.debug("New empty geoms! While processing %s=%s, the number of empty geometries has changed from %d to %d change of %d", args.group_by, group_key, old_num_empty_geoms, new_num_empty_geoms, (new_num_empty_geoms - old_num_empty_geoms))
 
 if __name__ == '__main__':
     main()
