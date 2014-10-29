@@ -241,8 +241,8 @@ def main():
 
                 # Now simplify each group
                 for group_key in groups:
-                    logger.debug("Simplifying all the objects with %s=%s", args.group_by, group_key)
                     objs = groups[group_key]
+                    logger.debug("Simplifying all %d object(s) with %s=%s", len(objs), args.group_by, group_key)
                     # Extract shapes
                     # If the geometry is "None", then make it empty
                     old_num_empty_geoms = sum(1 if obj['geometry'] is None else 0 for obj in objs)
