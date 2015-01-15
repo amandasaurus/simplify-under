@@ -8,7 +8,7 @@ from __future__ import division
 
 import argparse
 import fiona
-import shapely.geometry, shapely.wkt
+import shapely.geometry, shapely.wkt, shapely.wkb
 import logging
 import sys
 from collections import defaultdict
@@ -92,7 +92,9 @@ def simplify(geom, value, buffer=None):
     if buffer is not None:
         geom = geom.buffer(buffer*value)
 
-    new_geom = geom.simplify(value, preserve_topology=False)
+    #new_geom = geom.simplify(value, preserve_topology=False)
+    #new_geom = rdp_python(geom, value)
+    new_geom = simplify_via_postgis(geom, value)
 
     if new_geom.is_empty:
         # We shouldn't get empty geoms, so do it again with preserve_topology=True
@@ -120,6 +122,21 @@ def rdp_python(geom, value):
     print interiors
     return shapely.geometry.Polygon(exterior, interiors)
 
+
+def simplify_via_postgis(geom, value):
+    import psycopg2
+    connection = psycopg2.connect(dbname='rory')
+    cursor = connection.cursor()
+
+    query = "select ST_AsText(ST_Simplify('{}'::geometry, {}));".format(geom.wkb.encode("hex"), value)
+    cursor.execute(query)
+    new_geom_wkt = str(cursor.fetchone()[0])
+    if new_geom_wkt is None or new_geom_wkt == 'None':
+        new_geom_wkt = 'POLYGON EMPTY'
+    new_geom = shapely.wkt.loads(new_geom_wkt)
+
+    return new_geom
+                   
 
 
 
