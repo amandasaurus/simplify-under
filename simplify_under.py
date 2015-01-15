@@ -179,6 +179,7 @@ def reduce_points_combined(geoms, num_points, buffer=None):
 
         if middle_value_points == num_points:
             # shortcut, success, this is as good as we can get
+            logger.debug("Step {}, min={}, max={}, middle_value={}, middle_value_points={} EXACTLY RIGHT".format(step, min, max, middle_value, middle_value_points))
             return new_geoms
         elif middle_value_points > num_points:
             logger.debug("Step {}, min={}, max={}, middle_value={}, middle_value_points={} TOO LARGE".format(step, min, max, middle_value, middle_value_points))
@@ -188,7 +189,7 @@ def reduce_points_combined(geoms, num_points, buffer=None):
             max = middle_value
 
         if abs(max - min) < 0.00001:
-            logger.debug("close enough, difference of %s", abs(max - min))
+            logger.debug("Close enough, difference of %s using middle_value %s with %s points", abs(max - min), middle_value, middle_value_points)
             return new_geoms
 
     return new_geoms
@@ -254,12 +255,13 @@ def main():
                 for row in source:
                     groups[row['properties'][args.group_by]].append(row)
 
-                logger.debug("Objects grouped. There are %d unique keys", len(groups))
+                num_groups = len(groups)
+                logger.debug("Objects grouped. There are %d unique keys", num_groups)
 
                 # Now simplify each group
-                for group_key in groups:
+                for idx, group_key in enumerate(groups):
                     objs = groups[group_key]
-                    logger.debug("Simplifying all %d object(s) with %s=%s", len(objs), args.group_by, group_key)
+                    logger.debug("Group %d of %d: Simplifying all %d object(s) with %s=%s", idx, num_groups, len(objs), args.group_by, group_key)
                     # Extract shapes
                     # If the geometry is "None", then make it empty
                     old_num_empty_geoms = sum(1 if obj['geometry'] is None else 0 for obj in objs)
